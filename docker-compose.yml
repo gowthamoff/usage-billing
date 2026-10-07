@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: billing
+      POSTGRES_PASSWORD: billing
+      POSTGRES_DB: billing
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates the billing_test database on first start (used by the pytest integration suite).
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billing -d billing"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://billing:billing@db:5432/billing
+      API_KEY: dev-key
+      WEBHOOK_URL: http://api:8000/api/v1/webhook-receiver
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      # Dockerfile WORKDIR is /app, so the generated events.jsonl.gz persists on the host.
+      - ./backend/sample-data:/app/sample-data
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the SPA at build time; must match the api service's API_KEY.
+        VITE_API_KEY: dev-key
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+
+volumes:
+  pgdata:
