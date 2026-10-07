@@ -37,30 +37,29 @@
 - [6. Testing](#6-testing)
 - [7. Out of scope / not built](#7-out-of-scope--not-built)
 - [8. Demo video checklist](#8-demo-video-checklist)
-  - [Scene 1 — Idempotent ingestion (accepted / duplicate / rejected)](#scene-1--idempotent-ingestion-accepted--duplicate--rejected)
- 
-https://github.com/user-attachments/assets/412e86ad-c27e-42a9-88de-7e379bf30d15
-  - [Scene 2 — Thresholds and the outbox](#scene-2--thresholds-and-the-outbox)
- 
-https://github.com/user-attachments/assets/5651f1ed-4d46-42bd-947c-673a6316093d
-  - [Scene 3 — Close a cycle, read the invoice](#scene-3--close-a-cycle-read-the-invoice)
-    
-https://github.com/user-attachments/assets/794e99f8-fc0c-4bee-ade4-b2cecddf2b25
-  - [Scene 4 — Late event → adjustment on the next invoice](#scene-4--late-event--adjustment-on-the-next-invoice)
-
-https://github.com/user-attachments/assets/d2c8a02b-1495-4a9b-b9ba-a21c9c74067a
 
 Suggested review path: [Late-event policy](#late-event-policy), then the [decisions at a glance](#4-design-decisions--trade-offs)
 and the [lifecycle of one event](#3-lifecycle-of-one-event).
 
 ## Demo videos
 
-| Scene | What it shows | Video |
-|---|---|---|
-| 1 | Re-sending the same batch doesn't change the numbers | [scene1-idempotent-ingestion.mp4](docs/demo/scene1-idempotent-ingestion.mp4) |
-| 2 | 50 / 80 / 100 % notifications fire once each per cycle | [scene2-thresholds-fire-once.mp4](docs/demo/scene2-thresholds-fire-once.mp4) |
-| 3 | Closing a cycle produces an invoice; closing it twice doesn't double-bill | [scene3-invoice-generation.mp4](docs/demo/scene3-invoice-generation.mp4) |
-| 4 | A late event is billed as an adjustment on the next invoice | [scene4-late-event-adjustment.mp4](docs/demo/scene4-late-event-adjustment.mp4) |
+**Scene 1 — Re-sending the same batch doesn't change the numbers**
+
+https://github.com/user-attachments/assets/412e86ad-c27e-42a9-88de-7e379bf30d15
+
+**Scene 2 — 50 / 80 / 100 % alerts fire once each per cycle**
+
+https://github.com/user-attachments/assets/5651f1ed-4d46-42bd-947c-673a6316093d
+
+**Scene 3 — Closing a cycle produces an invoice; closing twice doesn't double-bill**
+
+https://github.com/user-attachments/assets/794e99f8-fc0c-4bee-ade4-b2cecddf2b25
+
+**Scene 4 — A late event is billed as an adjustment on the next invoice**
+
+https://github.com/user-attachments/assets/d2c8a02b-1495-4a9b-b9ba-a21c9c74067a
+
+Downloadable copies: [scene1-idempotent-ingestion.mp4](docs/demo/scene1-idempotent-ingestion.mp4) · [scene2-thresholds-fire-once.mp4](docs/demo/scene2-thresholds-fire-once.mp4) · [scene3-invoice-generation.mp4](docs/demo/scene3-invoice-generation.mp4) · [scene4-late-event-adjustment.mp4](docs/demo/scene4-late-event-adjustment.mp4)
 
 ---
 
@@ -89,13 +88,9 @@ docker compose run --rm api python -m app.cli generate --events 500000 --out sam
 docker compose run --rm api python -m app.cli load --file sample-data/events.jsonl.gz --batch-size 5000
 ```
 
-- `events.jsonl.gz` is already in the repo, so `generate` is optional (only to regenerate with a different seed/size); `load` is the command to run.
-- Run `docker compose up --build` once before this: `docker compose run` replaces the container command, so migrations and seed do not run inside it.
-- `./backend/sample-data` is bind-mounted at `/app/sample-data`, so the `.gz` file lands on the host and is committed as the sample data.
-- The loader goes through the same `services.ingest.ingest_batch` as the API.
-- It prints `received / accepted / duplicate / rejected / thresholds_fired` plus elapsed seconds (progress every 10 batches).
-- ~2 % of the lines are deliberate duplicates: expect `duplicate ≈ 10000`, `rejected = 0`.
-- Other CLI commands: `python -m app.cli seed`, `rebuild-counters`, `close-due`.
+- `events.jsonl.gz` is already committed, so only `load` is needed (`generate` just recreates it).
+- Run `docker compose up --build` first: `docker compose run` skips the migrate-and-seed startup step.
+- Expected: 490,000 accepted, ~10,000 duplicates (deliberate 2 %), 0 rejected. Loads through the same ingest code as the API.
 
 ### Run the tests
 
@@ -755,72 +750,14 @@ Not covered by tests:
 
 ## 8. Demo video checklist
 
-Recorded videos: see [Demo videos](#demo-videos) at the top.
+How the [recorded videos](#demo-videos) were made, so they can be reproduced. All requests go through http://localhost:8000/docs (click **Authorize**, enter `dev-key`); results are checked in the dashboard at http://localhost:5173.
 
-Setup before recording:
+| Scene | Steps | Expected |
+|---|---|---|
+| 1. Idempotent ingestion | `POST /events/batch` with 3 events for `cus_asha` (quantity 1 each), then send the identical body again | 1st: 200, 3 `accepted`. 2nd: 200, 3 `duplicate`. Usage stays at 3 calls |
+| 2. Thresholds fire once | For a basic-plan customer, send quantities 7,900 → 200 → 2,000 → 500 (new `event_id` each time) | 79 %: 50 % alert · 81 %: 80 % alert, tag orange · 101 %: 100 % alert, tag red · last batch: no new alert. Each row shows **Sent** |
+| 3. Invoice generation | Send 12,000 calls dated in the previous cycle, then `POST /customers/{id}/cycles/close` with `{}` twice | 1st: 201, `total_minor` 100000 (₹1,000). 2nd: 200, same invoice `id`. Invoice page explains the line |
+| 4. Late event | Send 100 calls dated inside that closed cycle, then press **Close cycle** in the dashboard | Event: `accepted`, `is_late: true`; old invoice unchanged. New invoice has an adjustment line of ₹50 pointing to the old one |
 
-- `docker compose up --build`, then the generate + load commands from section 1.
-- Open http://localhost:5173 (lands on `cus_asha`'s usage page).
-
-### Scene 1 — Idempotent ingestion (accepted / duplicate / rejected)
-
-```sh
-curl -s -X POST localhost:8000/api/v1/events/batch -H "X-API-Key: dev-key" -H "Content-Type: application/json" -d '{
-  "events": [
-    {"event_id": "evt_demo_1", "customer_id": "cus_asha", "meter": "api_calls", "quantity": 25, "occurred_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"},
-    {"event_id": "evt_demo_1", "customer_id": "cus_asha", "meter": "api_calls", "quantity": 99, "occurred_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"},
-    {"event_id": "evt_demo_2", "customer_id": "cus_nobody", "meter": "api_calls", "quantity": 1, "occurred_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"},
-    {"event_id": "evt_demo_3", "customer_id": "cus_asha", "meter": "api_calls", "quantity": 0, "occurred_at": "2099-01-01T00:00:00Z"}
-  ]}' | jq
-```
-
-- Show: HTTP 207, `summary` 1 accepted / 1 duplicate / 2 rejected, per-event codes `unknown_customer`, `invalid_quantity`.
-- Re-run the same command: `evt_demo_1` is now `duplicate`, nothing else changes.
-- Show the cap: `curl -s -o /dev/null -w "%{http_code}\n" ... -d '{"events": [1000+ items]}'` → 413.
-- Or mention it; `test_oversized_batch_returns_413` covers it.
-- UI: Usage page for Asha Verma; the API calls card ticks up by 25 within 10 s (the "Auto-refreshes every 10 s" badge spins).
-
-### Scene 2 — Thresholds and the outbox
-
-- UI: switch the header dropdown to Noor Haddad (`cus_noor`, basic plan, ~90 % after the load).
-- Show: orange "approaching limit" tag, progress bar, 50 % and 80 % rows in the "Threshold notifications" table with `sent_at` filled.
-- Push Noor over 100 % (quantity large enough for the remaining allowance):
-
-```sh
-curl -s -X POST localhost:8000/api/v1/events/batch -H "X-API-Key: dev-key" -H "Content-Type: application/json" -d '{
-  "events": [{"event_id": "evt_demo_noor_100", "customer_id": "cus_noor", "meter": "api_calls", "quantity": 2000, "occurred_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}]}' | jq
-```
-
-- Within 10 s the card turns red "in overage" and a 100 % row appears.
-- `docker compose logs -f api | grep "webhook received"` shows the POST landing on the stub with `"threshold": 100`.
-- `curl -s localhost:8000/api/v1/customers/cus_noor/notifications -H "X-API-Key: dev-key" | jq` → `sent_at`, `attempts: 0`.
-- Re-send the same event: duplicate, no second 100 % row (the UNIQUE constraint).
-
-### Scene 3 — Close a cycle, read the invoice
-
-- Close Asha's most recently ended cycle (the real one, not forced):
-
-```sh
-curl -s -i -X POST localhost:8000/api/v1/customers/cus_asha/cycles/close -H "X-API-Key: dev-key" -H "Content-Type: application/json" -d '{}'
-```
-
-- Show: `HTTP/1.1 201`, `total_minor`, `period_start_local` / `period_end_local` at `+05:30` midnight.
-- Run it again: `HTTP/1.1 200`, same `id`.
-- UI: Invoices tab → the invoice row → detail page: one line per meter, "N calls used · 10,000 included · M extra × ₹0.50 = ₹…", total.
-- Mention: no edit/delete endpoint exists for invoices.
-
-### Scene 4 — Late event → adjustment on the next invoice
-
-- Pick a timestamp inside the cycle just closed in scene 3 (e.g. two days before the current period start shown by `GET /customers/cus_asha`), and send it:
-
-```sh
-curl -s -X POST localhost:8000/api/v1/events/batch -H "X-API-Key: dev-key" -H "Content-Type: application/json" -d '{
-  "events": [{"event_id": "evt_demo_late", "customer_id": "cus_asha", "meter": "api_calls", "quantity": 400, "occurred_at": "<inside the closed cycle, e.g. 2026-03-01T10:00:00Z>"}]}' | jq
-```
-
-- Show: `"status": "accepted", "is_late": true`; the Usage page and the existing invoice do not change.
-- Send one dated two cycles back → `late_event_too_old`.
-- UI: Usage page → "Close cycle" button (top right) → confirm (demo-only force close of the current cycle) → success toast with the new invoice link → click it.
-- Show: usage lines for the current cycle plus a purple "Adjustment" line: `400 calls received late · 400 extra × ₹0.50 = ₹200.00`.
-- The adjustment line links back to the scene 3 invoice (`adjusts_invoice_id`).
-- Close with: `python -m app.cli close-due` / `POST /cycles/close-due` would do the same for every customer on a schedule.
+- Use `occurred_at` values at or before the current time; anything more than 5 minutes ahead is rejected as `future_timestamp`.
+- Alerts fire once per customer per cycle, so to re-record scene 2 use another customer or reset with `docker compose down -v`.
