@@ -38,9 +38,13 @@
 - [7. Out of scope / not built](#7-out-of-scope--not-built)
 - [8. Demo video checklist](#8-demo-video-checklist)
   - [Scene 1 — Idempotent ingestion (accepted / duplicate / rejected)](#scene-1--idempotent-ingestion-accepted--duplicate--rejected)
+https://github.com/user-attachments/assets/412e86ad-c27e-42a9-88de-7e379bf30d15
   - [Scene 2 — Thresholds and the outbox](#scene-2--thresholds-and-the-outbox)
+https://github.com/user-attachments/assets/5651f1ed-4d46-42bd-947c-673a6316093d
   - [Scene 3 — Close a cycle, read the invoice](#scene-3--close-a-cycle-read-the-invoice)
+https://github.com/user-attachments/assets/794e99f8-fc0c-4bee-ade4-b2cecddf2b25
   - [Scene 4 — Late event → adjustment on the next invoice](#scene-4--late-event--adjustment-on-the-next-invoice)
+https://github.com/user-attachments/assets/d2c8a02b-1495-4a9b-b9ba-a21c9c74067a
 
 Suggested review path: [Lifecycle of one event](#3-lifecycle-of-one-event), then
 [Idempotency key](#idempotency-key), [Timezones](#timezones), [Late-event policy](#late-event-policy)
