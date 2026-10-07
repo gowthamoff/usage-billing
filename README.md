@@ -17,17 +17,17 @@
 - [2. Architecture](#2-architecture)
 - [3. Lifecycle of one event](#3-lifecycle-of-one-event)
 - [4. Design decisions & trade-offs](#4-design-decisions--trade-offs)
-  - [API design](#api-design)
+  - [Late-event policy](#late-event-policy)
   - [Idempotency key](#idempotency-key)
   - [Event-time vs receipt-time](#event-time-vs-receipt-time)
-  - [Money](#money)
   - [Timezones](#timezones)
-  - [Cycle anchoring](#cycle-anchoring)
   - [Aggregation strategy](#aggregation-strategy)
   - [Thresholds & outbox](#thresholds--outbox)
-  - [Late-event policy](#late-event-policy)
   - [Invoice immutability](#invoice-immutability)
+  - [Money](#money)
+  - [Cycle anchoring](#cycle-anchoring)
   - [Mid-cycle plan change (designed for, not implemented)](#mid-cycle-plan-change-designed-for-not-implemented)
+  - [API design](#api-design)
   - [Batch cap](#batch-cap)
   - [Future tolerance](#future-tolerance)
   - [Simple API key](#simple-api-key)
@@ -50,9 +50,8 @@ https://github.com/user-attachments/assets/794e99f8-fc0c-4bee-ade4-b2cecddf2b25
 
 https://github.com/user-attachments/assets/d2c8a02b-1495-4a9b-b9ba-a21c9c74067a
 
-Suggested review path: [Lifecycle of one event](#3-lifecycle-of-one-event), then
-[Idempotency key](#idempotency-key), [Timezones](#timezones), [Late-event policy](#late-event-policy)
-and [Aggregation strategy](#aggregation-strategy).
+Suggested review path: [Late-event policy](#late-event-policy), then the [decisions at a glance](#4-design-decisions--trade-offs)
+and the [lifecycle of one event](#3-lifecycle-of-one-event).
 
 ## Demo videos
 
@@ -247,22 +246,55 @@ Where things live:
 
 ## 4. Design decisions & trade-offs
 
-### API design
+**At a glance**
 
-- Resources, not verbs: `events/batch`, `customers/{id}/usage`, `customers/{id}/invoices`, `invoices/{id}`.
-- The two state changes that are not CRUD (`cycles/close`, `admin/counters/rebuild`) are explicit POST actions.
-- Batch status codes: 200 all accepted/duplicate; 207 at least one rejected (body identical in shape, so clients parse once).
-- 400 envelope malformed: `RequestValidationError` is remapped so the body is the same `{"error": {...}}` envelope everywhere.
-- 413 over the cap.
-- Per-event errors never fail the batch; a client with one bad row still gets the other 999 stored.
-- One error shape everywhere: `{"error": {"code", "message", "details"?}}`. Even Starlette's own 404/405 are rewritten into it (`code: "http_error"`).
-- I chose a plain `events: list[Any]` in the envelope and validate each item in the domain.
-- So Pydantic cannot reject the whole batch because of one malformed item.
+| Topic | Decision |
+|---|---|
+| [Late events](#late-event-policy) | Accept; bill the difference as an adjustment on the next invoice; reject if older than one cycle |
+| [Idempotency](#idempotency-key) | Client-sent `event_id` is the primary key; repeats are reported `duplicate` and never re-counted |
+| [Event vs receipt time](#event-time-vs-receipt-time) | `occurred_at` decides the cycle; `received_at` decides lateness |
+| [Timezones](#timezones) | Cycle starts at local midnight on the signup day, converted to UTC once; everything else compares UTC |
+| [Aggregation](#aggregation-strategy) | Reads sum raw events (11–34 ms at 490K rows); counters exist only for the threshold check |
+| [Thresholds](#thresholds--outbox) | Unique row per customer × meter × cycle × threshold; a background worker delivers |
+| [Invoices](#invoice-immutability) | Never edited; closing twice returns the same invoice |
+| [Money](#money) | Integer paise; rates as `NUMERIC`; rounded once per line |
+
+### Late-event policy
+
+**Decision:** accept the late event, leave the issued invoice untouched, and bill the difference as an adjustment line on the next invoice.
+
+**Example** (`cus_asha`, basic plan: 10,000 calls included, ₹0.50 per extra call):
+
+| When | What happens | Billed |
+|---|---|---|
+| 10 Sep: cycle 10 Aug – 10 Sep closes | 12,000 calls → 2,000 extra → invoice A | ₹1,000 |
+| 15 Sep: 100 calls dated 5 Sep arrive (inside the closed cycle) | accepted with `is_late = true`; invoice A unchanged | — |
+| 10 Oct: cycle 10 Sep – 10 Oct closes | old cycle re-rated: 12,100 calls → ₹1,050; already billed ₹1,000 → **adjustment line ₹50** on invoice B, pointing to A | +₹50 |
+| 12 Nov: another event dated 5 Sep arrives | that cycle is now two cycles back → rejected `late_event_too_old` | — |
+
+**Rules**
+
+- Accepted only if its cycle is invoiced and is the one just before the current cycle (or the current cycle after a demo force-close).
+- Stored with its true `billing_period_start`; it does not touch counters or threshold alerts (that cycle's alerts are history).
+- At each close, earlier invoiced cycles are re-rated at their own allowance and rate; only the difference is billed.
+- The difference subtracts everything already billed for that cycle, so a late event is billed exactly once.
+- Late usage still within the allowance adds no line (difference ₹0).
+- Older than one cycle back → rejected. Bills settle after one month, like a typical dispute window.
+
+**Why not the alternatives**
+
+| Alternative | Problem |
+|---|---|
+| Reject every late event | Loses real usage and revenue |
+| Edit and reissue the old invoice | Breaks immutability |
+| Count it as current usage | Wrong month's allowance and rate; chart shows it on the wrong day |
+| Delay every close by a grace window | Slows all invoices for a rare case |
+
 - Code:
-  - [backend/app/api/routes/events.py](backend/app/api/routes/events.py)
-  - [backend/app/api/schemas/events.py](backend/app/api/schemas/events.py)
-  - [backend/app/main.py](backend/app/main.py) — exception handlers / error envelope
-  - [backend/app/errors.py](backend/app/errors.py)
+  - [backend/app/domain/validation.py](backend/app/domain/validation.py) — accept / `late_event_too_old`
+  - [backend/app/services/invoicing.py](backend/app/services/invoicing.py) — `_adjustment_lines`
+  - [backend/tests/unit/test_validation.py](backend/tests/unit/test_validation.py)
+  - [backend/tests/integration/test_invoicing.py](backend/tests/integration/test_invoicing.py)
 
 ### Idempotency key
 
@@ -294,19 +326,6 @@ Where things live:
   - [backend/app/services/ingest.py](backend/app/services/ingest.py)
   - [backend/app/services/usage.py](backend/app/services/usage.py) — chart buckets
 
-### Money
-
-- Amounts are integer paise (`bigint`), never floats; totals are plain integer sums.
-- Rates are `Decimal` in Python and `NUMERIC(14,6)` in Postgres, in paise per unit (`50.000000` = ₹0.50/call).
-- So sub-paisa rates are representable.
-- Rounding happens exactly once per invoice line, `ROUND_HALF_UP` on `overage_units × rate`.
-- Example: 1234 units × 0.2 paise = 246.8 → 247 paise; per-unit rounding would give 0.
-- The usage page reuses the same `rate_meter` function, so "cost so far" always matches what the invoice will say.
-- Code:
-  - [backend/app/domain/money.py](backend/app/domain/money.py)
-  - [backend/app/domain/rating.py](backend/app/domain/rating.py)
-  - [backend/app/db/models.py](backend/app/db/models.py) — `BigInteger` amounts, `Numeric(14, 6)` rates
-
 ### Timezones
 
 - A cycle boundary is local midnight on the anchor day in the customer's IANA zone, converted to UTC once (`period_start_utc`).
@@ -325,14 +344,6 @@ Where things live:
 - Code:
   - [backend/app/domain/cycles.py](backend/app/domain/cycles.py)
   - [backend/tests/unit/test_cycles.py](backend/tests/unit/test_cycles.py)
-
-### Cycle anchoring
-
-- Monthly, anchored to the `signup_date` day. When that day does not exist in a month, clamp to the month's last day (31 Jan → 28 Feb).
-- Cycle N is always `signup_date + N months`, never "previous boundary + 1 month", so the clamp never accumulates: 31 Jan → 28 Feb → 31 Mar → 30 Apr.
-- `period_index_at` brackets an instant by starting from the calendar month difference and walking at most one step.
-- `previous_period` / `next_period` are index arithmetic.
-- Code: [backend/app/domain/cycles.py](backend/app/domain/cycles.py)
 
 ### Aggregation strategy
 
@@ -402,31 +413,6 @@ GROUP BY 1;
   - [backend/app/api/routes/webhook.py](backend/app/api/routes/webhook.py) — receiver stub
   - [backend/tests/integration/test_thresholds_db.py](backend/tests/integration/test_thresholds_db.py)
 
-### Late-event policy
-
-- Chosen: accept the event if its period is already invoiced but is the cycle immediately before the customer's current open cycle.
-- The same applies to the current cycle itself after a force-close.
-- Store it with `is_late = true` and its original `billing_period_start`.
-- Do not touch counters or thresholds (that cycle's notifications are history).
-- At the next close, re-rate every earlier invoiced period from raw events at that period's own allowance and rate.
-- Bill only the delta as an `adjustment` line on the new invoice (`adjusts_invoice_id` points back).
-- The delta subtracts every line already carrying that `period_start` (usage + earlier adjustments).
-- So a late event is billed exactly once, with no "already billed" flag on events.
-- Cutoff: periods older than one cycle back are rejected with `late_event_too_old`.
-- It bounds how far back a close has to look and matches a one-month dispute window.
-- What it does not touch: the closed invoice (immutable), `usage_counters`, threshold rows, the current period's usage figures.
-- Late usage that stays within the allowance produces no line at all (tested).
-- Rejected alternatives:
-  - Reject anything after close: loses real usage, and clients retrying a queue would be penalised for my latency.
-  - Reopen and reissue the invoice: breaks immutability and whatever accounting already consumed it.
-  - Bill late events in the period they were received: wrong allowance and wrong rate, and the chart would show usage on the wrong days.
-  - Hold every close for a grace window: delays all invoices for the rare late event; the adjustment line costs nothing when there is none.
-- Code:
-  - [backend/app/domain/validation.py](backend/app/domain/validation.py) — accept / `late_event_too_old`
-  - [backend/app/services/invoicing.py](backend/app/services/invoicing.py) — `_adjustment_lines`
-  - [backend/tests/unit/test_validation.py](backend/tests/unit/test_validation.py)
-  - [backend/tests/integration/test_invoicing.py](backend/tests/integration/test_invoicing.py)
-
 ### Invoice immutability
 
 - There is no UPDATE or DELETE path for `invoices` or `invoice_lines` anywhere in the code (no route, no service, no cascade).
@@ -437,6 +423,27 @@ GROUP BY 1;
   - [backend/app/services/invoicing.py](backend/app/services/invoicing.py)
   - [backend/app/api/routes/invoices.py](backend/app/api/routes/invoices.py) — read-only routes
   - [backend/alembic/versions/0001_initial.py](backend/alembic/versions/0001_initial.py) — `uq_invoices_customer_period`
+
+### Money
+
+- Amounts are integer paise (`bigint`), never floats; totals are plain integer sums.
+- Rates are `Decimal` in Python and `NUMERIC(14,6)` in Postgres, in paise per unit (`50.000000` = ₹0.50/call).
+- So sub-paisa rates are representable.
+- Rounding happens exactly once per invoice line, `ROUND_HALF_UP` on `overage_units × rate`.
+- Example: 1234 units × 0.2 paise = 246.8 → 247 paise; per-unit rounding would give 0.
+- The usage page reuses the same `rate_meter` function, so "cost so far" always matches what the invoice will say.
+- Code:
+  - [backend/app/domain/money.py](backend/app/domain/money.py)
+  - [backend/app/domain/rating.py](backend/app/domain/rating.py)
+  - [backend/app/db/models.py](backend/app/db/models.py) — `BigInteger` amounts, `Numeric(14, 6)` rates
+
+### Cycle anchoring
+
+- Monthly, anchored to the `signup_date` day. When that day does not exist in a month, clamp to the month's last day (31 Jan → 28 Feb).
+- Cycle N is always `signup_date + N months`, never "previous boundary + 1 month", so the clamp never accumulates: 31 Jan → 28 Feb → 31 Mar → 30 Apr.
+- `period_index_at` brackets an instant by starting from the calendar month difference and walking at most one step.
+- `previous_period` / `next_period` are index arithmetic.
+- Code: [backend/app/domain/cycles.py](backend/app/domain/cycles.py)
 
 ### Mid-cycle plan change (designed for, not implemented)
 
@@ -451,6 +458,23 @@ GROUP BY 1;
 - Code:
   - [backend/app/db/models.py](backend/app/db/models.py) — `customers.plan_id`, `InvoiceLine` period bounds and rate
   - [backend/alembic/versions/0001_initial.py](backend/alembic/versions/0001_initial.py)
+
+### API design
+
+- Resources, not verbs: `events/batch`, `customers/{id}/usage`, `customers/{id}/invoices`, `invoices/{id}`.
+- The two state changes that are not CRUD (`cycles/close`, `admin/counters/rebuild`) are explicit POST actions.
+- Batch status codes: 200 all accepted/duplicate; 207 at least one rejected (body identical in shape, so clients parse once).
+- 400 envelope malformed: `RequestValidationError` is remapped so the body is the same `{"error": {...}}` envelope everywhere.
+- 413 over the cap.
+- Per-event errors never fail the batch; a client with one bad row still gets the other 999 stored.
+- One error shape everywhere: `{"error": {"code", "message", "details"?}}`. Even Starlette's own 404/405 are rewritten into it (`code: "http_error"`).
+- I chose a plain `events: list[Any]` in the envelope and validate each item in the domain.
+- So Pydantic cannot reject the whole batch because of one malformed item.
+- Code:
+  - [backend/app/api/routes/events.py](backend/app/api/routes/events.py)
+  - [backend/app/api/schemas/events.py](backend/app/api/schemas/events.py)
+  - [backend/app/main.py](backend/app/main.py) — exception handlers / error envelope
+  - [backend/app/errors.py](backend/app/errors.py)
 
 ### Batch cap
 
