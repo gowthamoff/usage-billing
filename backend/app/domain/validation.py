@@ -14,6 +14,7 @@ UNKNOWN_METER = "unknown_meter"
 INVALID_QUANTITY = "invalid_quantity"
 FUTURE_TIMESTAMP = "future_timestamp"
 LATE_EVENT_TOO_OLD = "late_event_too_old"
+BEFORE_SIGNUP = "before_signup"
 
 _REQUIRED_FIELDS = ("event_id", "customer_id", "meter", "quantity", "occurred_at")
 
@@ -88,6 +89,8 @@ def classify_event(
         return Rejection(event_id, FUTURE_TIMESTAMP, f"occurred_at is more than {future_tolerance_seconds}s in the future")
 
     period = period_containing(customer.signup_date, customer.timezone, occurred_at)
+    if period.index < 0:
+        return Rejection(event_id, BEFORE_SIGNUP, "occurred_at is before the customer's signup date")
     is_late = period.start_utc in customer.invoiced_period_starts
     if is_late:
         current = period_containing(customer.signup_date, customer.timezone, now)

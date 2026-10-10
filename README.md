@@ -157,7 +157,7 @@ Where things live:
 - Wrong key → 401 · malformed body → 400 · more than 1,000 events → 413.
 
 **2. Each event is checked on its own** ([domain/validation.py](backend/app/domain/validation.py))
-- Rejected if: unknown customer, meter not in the customer's plan, quantity not positive, or timestamp more than 5 minutes in the future.
+- Rejected if: unknown customer, meter not in the customer's plan, quantity not positive, timestamp more than 5 minutes in the future, or dated before the customer's signup date.
 - One bad event never fails the batch; it's reported and the rest continue.
 
 **3. The event is placed in its billing cycle** ([domain/cycles.py](backend/app/domain/cycles.py))
@@ -464,7 +464,7 @@ Response `207` (one event rejected):
 ```
 
 - `status` is `accepted`, `duplicate` or `rejected`; late accepted events also carry `"is_late": true`.
-- Per-event rejection codes: `invalid_event`, `unknown_customer`, `unknown_meter`, `invalid_quantity`, `future_timestamp`, `late_event_too_old`.
+- Per-event rejection codes: `invalid_event`, `unknown_customer`, `unknown_meter`, `invalid_quantity`, `future_timestamp`, `before_signup`, `late_event_too_old`.
 
 ### `GET /customers/{id}/usage`
 
@@ -540,7 +540,7 @@ One command runs both suites: **76 tests pass in ~20 s, 80 % total coverage** (c
 | Threshold deduplication | [`test_thresholds_db.py`](backend/tests/integration/test_thresholds_db.py): 50/80/100 fire exactly once across five batches plus a replay |
 | Idempotency | [`test_ingest.py`](backend/tests/integration/test_ingest.py): **`test_reingesting_the_same_batch_does_not_move_the_numbers`**; in-batch duplicates; retry after partial delivery |
 | Billing-period boundary in a non-UTC timezone | [`test_cycles.py`](backend/tests/unit/test_cycles.py): **Kolkata event at `2026-02-09T20:00Z` lands in the cycle starting `18:30Z`**; 31 Jan → 28 Feb → 31 Mar without drift; New York DST months |
-| Validation | [`test_validation.py`](backend/tests/unit/test_validation.py): the four required rejections, future tolerance edge, late vs too-old |
+| Validation | [`test_validation.py`](backend/tests/unit/test_validation.py): the four required rejections, future tolerance edge, before-signup, late vs too-old |
 | Invoicing | [`test_invoicing.py`](backend/tests/integration/test_invoicing.py): close twice → one invoice; explainable lines; late event → ₹ adjustment on the next invoice, old invoice untouched; `close-due` once per customer |
 | Rebuildable aggregates | [`test_counters.py`](backend/tests/integration/test_counters.py): rebuilt counters equal the live ones |
 

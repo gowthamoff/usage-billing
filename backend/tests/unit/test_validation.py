@@ -6,6 +6,7 @@ import pytest
 
 from app.domain.cycles import period_by_index
 from app.domain.validation import (
+    BEFORE_SIGNUP,
     FUTURE_TIMESTAMP,
     INVALID_EVENT,
     INVALID_QUANTITY,
@@ -98,6 +99,15 @@ def test_future_timestamp_beyond_tolerance_is_rejected_but_within_tolerance_is_a
 def test_shape_errors_are_invalid_event(raw):
     result = classify_event(raw, NOW, context())
     assert isinstance(result, Rejection) and result.code == INVALID_EVENT
+
+
+def test_event_before_the_signup_date_is_rejected_but_signup_day_counts():
+    # 9 Jan 23:30 IST is before the 10 Jan signup; 10 Jan 00:30 IST is the first minute of cycle 0.
+    before = classify_event(event(occurred_at="2026-01-09T18:00:00Z"), NOW, context())
+    assert isinstance(before, Rejection) and before.code == BEFORE_SIGNUP
+    first = classify_event(event(occurred_at="2026-01-09T19:00:00Z"), NOW, context())
+    assert isinstance(first, ValidEvent)
+    assert first.billing_period_start == period_by_index(SIGNUP, TZ, 0).start_utc
 
 
 def test_late_event_for_the_cycle_just_before_the_current_one_is_accepted_as_late():
